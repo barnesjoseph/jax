@@ -34,7 +34,7 @@ from jax._src.lax import lax
 from jax._src.lax import slicing as lax_slicing
 from jax._src.state import indexing
 from jax._src.state.primitives import addupdate_p, get_p, swap_p
-from jax._src.state.types import AbstractRef, RefBitcaster, RefEffect
+from jax._src.state.types import AbstractRef, RefBitcaster, RefEffect, RefReshaper
 from jax._src.state.utils import bitcast, hoist_consts_to_refs
 from jax._src.typing import Array
 from jax._src.util import (
@@ -308,6 +308,11 @@ def _prepend_scatter(x, indexer, val, *, add=False):
 def _bitcast_array(x, bitcaster: RefBitcaster):
   return bitcast(x, bitcaster.dtype)
 
+
+def _reshape_array(x, reshaper: RefReshaper):
+  return x.reshape(reshaper.shape)
+
+
 def _index_array(x, indexer):
   if _is_trivial_indexer(indexer):
     return x
@@ -351,26 +356,29 @@ def transform_swap_array(x, transforms, val):
   # Compute updated "val" (result).
   _results = [x]
   for transform in transforms:
-    if isinstance(transform, indexing.NDIndexer):
-      indexer = transform
-      if _is_trivial_indexer(indexer):
-        _results.append(None)
-        continue
-      # If everything in the indexer is a slice or ()-shaped, we can also
-      # use `lax.dynamic_slice` with 1-sized slices for ()-shaped indices.
-      # We need to squeeze out the 1-sized slices at the end.
-      if maybe_slice := _maybe_convert_to_dynamic_slice(indexer):
-        starts, sizes, squeeze_dims = maybe_slice
-        result_old = lax_slicing.dynamic_slice(result, starts, sizes)
-        result = lax.squeeze(result_old, squeeze_dims)
-      else:
-        indexer = _convert_to_array_indexer(indexer)
-        result = _prepend_gather(result, indexer)
-      _results.append(result)
-    elif isinstance(transform, RefBitcaster):
-      _results.append(_bitcast_array(result, transform))
-    else:
-      raise NotImplementedError(f"Unsupported transform: {transform}")
+    match transform:
+      case indexing.NDIndexer():
+        indexer = transform
+        if _is_trivial_indexer(indexer):
+          _results.append(None)
+          continue
+        # If everything in the indexer is a slice or ()-shaped, we can also
+        # use `lax.dynamic_slice` with 1-sized slices for ()-shaped indices.
+        # We need to squeeze out the 1-sized slices at the end.
+        if maybe_slice := _maybe_convert_to_dynamic_slice(indexer):
+          starts, sizes, squeeze_dims = maybe_slice
+          result_old = lax_slicing.dynamic_slice(result, starts, sizes)
+          result = lax.squeeze(result_old, squeeze_dims)
+        else:
+          indexer = _convert_to_array_indexer(indexer)
+          result = _prepend_gather(result, indexer)
+        _results.append(result)
+      case RefBitcaster():
+        _results.append(_bitcast_array(result, transform))
+      case RefReshaper():
+        _results.append(_reshape_array(result, transform))
+      case _:
+        raise NotImplementedError(f"Unsupported transform: {transform}")
 
   # Compute updated "x" (result_val)
   for i, transform in reversed(list(enumerate(transforms))):
