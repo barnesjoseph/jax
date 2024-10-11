@@ -5276,6 +5276,26 @@ class UtilTest(jtu.JaxTestCase):
     self.assertFalse(hs4.subgroup_types())
     self.assertTrue(hs4.is_tiled())
 
+  def test_hlo_sharding_with_device_ordering(self):
+
+    hs1 = xc.HloSharding.tile_with_device_ordering(
+        np.array([[[0, 1], [2, 3]], [[4, 5], [6, 7]]], dtype=np.int64)
+    )
+    self.assertEqual(hs1, xc.HloSharding.iota_tile((2, 2, 2)))
+
+    hs2 = xc.HloSharding.tile_with_device_ordering(
+        np.array(
+            [
+                [[0, 1], [2, 3], [4, 5]],
+                [[6, 7], [8, 9], [10, 11]],
+                [[12, 13], [14, 15], [16, 17]],
+                [[18, 19], [20, 21], [22, 23]],
+            ],
+            dtype=np.int64,
+        )
+    )
+    self.assertEqual(hs2, xc.HloSharding.iota_tile((4, 3, 2)))
+
   def test_op_sharding_cache_on_mesh_pspec_sharding(self):
     ndim = 2
     mesh = jtu.create_mesh((4, 2), ('x', 'y'))
