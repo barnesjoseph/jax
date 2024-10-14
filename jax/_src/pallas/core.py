@@ -1038,3 +1038,68 @@ class CostEstimate:
         f'{{"flops": {self.flops}, "transcendentals": {self.transcendentals},'
         f' "bytes_accessed": {self.bytes_accessed}}}'
     ).encode("ascii")
+
+
+core_map_p = jax_core.Primitive("core_map")
+core_map_p.multiple_results = True
+
+def core_map(f, mesh):
+  flat_args, in_tree = tree_util.tree_flatten(((), {}))
+  flat_fun, out_tree_thunk = api_util.flatten_fun(lu.wrap_init(f), in_tree)
+  with jax_core.extend_axis_env_nd(mesh.shape.items()):
+    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_fun, flat_args)
+  out = core_map_p.bind(*consts, jaxpr=jaxpr, mesh=mesh)
+  if out:
+    raise ValueError("core_map-ped functions must not return any outputs.")
+  return tree_util.tree_unflatten(out_tree_thunk(), out)
+
+
+@core_map_p.def_effectful_abstract_eval
+def _core_map_abstract_eval(*args, jaxpr, mesh):
+  del args
+  if jaxpr.outvars:
+    raise ValueError("core_map must not return any outputs.")
+  effs = set()
+  for eff in jaxpr.effects:
+    if not isinstance(eff, jax_core.NamedAxisEffect):
+      effs.add(eff)
+      continue
+    if eff.name not in mesh.shape:
+      effs.add(eff)
+  return [], effs
+
+
+_core_map_mesh_rules = {}
+@state_discharge.register_discharge_rule(core_map_p)
+def _core_map_discharge_rule(in_avals, out_avals, *args_flat, jaxpr, mesh, **kwargs):
+  if type(mesh) not in _core_map_mesh_rules:
+    raise NotImplementedError(f"Mesh type {type(mesh)} not supported.")
+  return _core_map_mesh_rules[type(mesh)](
+      in_avals, out_avals, *args_flat, jaxpr=jaxpr, mesh=mesh, **kwargs
+  )
+
+
+def _core_map_typecheck_rule(_, *in_atoms, jaxpr, mesh):
+  del in_atoms
+  with jax_core.extend_axis_env_nd(tuple(mesh.shape.items())):
+    jax_core.check_jaxpr(jaxpr)
+  effs = set()
+  for eff in jaxpr.effects:
+    if not isinstance(eff, jax_core.NamedAxisEffect):
+      effs.add(eff)
+      continue
+    if eff.name not in mesh.shape:
+      effs.add(eff)
+  return [], effs
+jax_core.custom_typechecks[core_map_p] = _core_map_typecheck_rule
+
+
+def _core_map_axis_subst(params, subst, traverse):
+  if not traverse:
+    return params
+  def shadowed_subst(name):
+    return (name,) if name in params['mesh'].shape else subst(name)
+  with jax_core.extend_axis_env_nd(params['mesh'].shape.items()):
+    new_jaxpr = jax_core.subst_axis_names_jaxpr(params['jaxpr'], shadowed_subst)
+  return dict(params, jaxpr=new_jaxpr)
+jax_core.axis_substitution_rules[core_map_p] = _core_map_axis_subst
